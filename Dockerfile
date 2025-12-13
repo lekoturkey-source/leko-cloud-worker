@@ -8,6 +8,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 ENV PORT=8080
-EXPOSE 8080
 
-CMD ["python", "main.py"]
+CMD exec gunicorn --bind :$PORT main:app
