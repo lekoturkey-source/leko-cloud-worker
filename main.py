@@ -1,38 +1,53 @@
-import os
+
+
 from flask import Flask, request, jsonify
+import os
 from openai import OpenAI
 
 app = Flask(__name__)
 
-client = OpenAI(
-    api_key=os.environ.get("OPENAI_API_KEY")
-)
-
-@app.route("/health", methods=["GET"])
+@app.route("/", methods=["GET"])
 def health():
-    return jsonify({"status": "ok"}), 200
-
+    return jsonify({
+        "status": "ok"
+    })
 
 @app.route("/ask", methods=["POST"])
 def ask():
-    data = request.get_json()
+    try:
+        data = request.json or {}
+        text = data.get("text", "")
 
-    if not data or "text" not in data:
-        return jsonify({"error": "text field required"}), 400
+        # 1️⃣ API KEY KONTROLÜ
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            return jsonify({
+                "error": "OPENAI_API_KEY_NOT_FOUND"
+            }), 500
 
-    user_text = data["text"]
+        # 2️⃣ OpenAI client
+        client = OpenAI(api_key=api_key)
 
-    response = client.chat.completions.create(
-        model="gpt-4.1-mini",
-        messages=[
-            {"role": "system", "content": "You are a friendly kids robot assistant."},
-            {"role": "user", "content": user_text}
-        ]
-    )
+        # 3️⃣ OpenAI çağrısı
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "user", "content": text}
+            ]
+        )
 
-    answer = response.choices[0].message.content
+        # 4️⃣ HER ZAMAN JSON DÖN
+        return jsonify({
+            "answer": response.choices[0].message.content
+        })
 
-    return jsonify({
-        "answer": answer
-    })
+    except Exception as e:
+        # ❗ HATA OLURSA BİLE JSON
+        return jsonify({
+            "error": "INTERNAL_ERROR",
+            "detail": str(e)
+        }), 500
 
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8080)
