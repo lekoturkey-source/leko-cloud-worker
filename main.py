@@ -1,11 +1,17 @@
 import os
 from flask import Flask
 
+print(">>> LEKO MAIN.PY LOADED <<<")
+
 app = Flask(__name__)
 
 @app.route("/")
+def root():
+    return "LEKO OK - ROOT"
+
+@app.route("/health")
 def health():
-    return "Leko Cloud Worker is running 🚀"
+    return "LEKO OK - HEALTH"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
