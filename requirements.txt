@@ -1,4 +1,2 @@
 flask
-google-cloud-firestore
-google-auth
-openai
+gunicorn
