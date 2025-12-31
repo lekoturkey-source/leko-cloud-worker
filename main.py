@@ -53,13 +53,23 @@ def web_search(query: str) -> str:
 # AKIL: WEB GEREKİYOR MU?
 # ---------------------------
 def needs_web(text: str) -> bool:
+    # Güvenlik kilidi: zamansal belirsizlik varsa WEB ZORUNLU
+    time_words = [
+        "bugün", "şu an", "şimdi", "en son", "son", "sonuç",
+        "maç", "ne oldu", "kaç oldu", "güncel"
+    ]
+
+    lower = text.lower()
+    if any(w in lower for w in time_words):
+        return True
+
+    # Modelden ikinci görüş
     prompt = f"""
 Kullanıcı sorusu:
 {text}
 
-Bu soruyu cevaplamak için GÜNCEL / CANLI / BUGÜNE AİT internet bilgisi gerekir mi?
-
-Sadece EVET veya HAYIR yaz.
+Bu soru cevaplanırken güncel internet bilgisi gerekir mi?
+SADECE EVET veya HAYIR yaz.
 """
     r = client.chat.completions.create(
         model="gpt-5",
@@ -67,6 +77,7 @@ Sadece EVET veya HAYIR yaz.
         max_tokens=3
     )
     return "EVET" in r.choices[0].message.content.upper()
+
 
 
 @app.route("/ask", methods=["POST"])
