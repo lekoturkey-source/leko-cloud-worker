@@ -1,15 +1,56 @@
 from flask import Flask, request, jsonify
 import os
 import requests
+from datetime import datetime
 from openai import OpenAI
 
 app = Flask(__name__)
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-GOOGLE_CSE_ID = os.getenv("GOOGLE_CSE_ID")
+OPENAI_KEY = os.getenv("OPENAI_API_KEY")
+GOOGLE_KEY = os.getenv("GOOGLE_API_KEY")
+GOOGLE_CSE = os.getenv("GOOGLE_CSE_ID")
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+client = OpenAI(api_key=OPENAI_KEY)
+
+# -------------------------
+# Google "En Son" Arama
+# -------------------------
+def google_latest_search(query):
+    url = "https://www.googleapis.com/customsearch/v1"
+    params = {
+        "key": GOOGLE_KEY,
+        "cx": GOOGLE_CSE,
+        "q": query,
+        "num": 5,
+        "sort": "date"   # 🔥 Google'daki "En Son"
+    }
+
+    r = requests.get(url, params=params, timeout=10)
+    r.raise_for_status()
+    data = r.json()
+
+    items = data.get("items", [])
+    if not items:
+        return None
+
+    return items[0]  # 🥇 En güncel sonuç
+
+
+# -------------------------
+# GPT cevap üretimi
+# -------------------------
+def ask_gpt(prompt):
+    try:
+        return client.chat.completions.create(
+            model="gpt-5",
+            messages=[{"role": "user", "content": prompt}]
+        ).choices[0].message.content
+    except Exception:
+        # 🔁 Otomatik GPT-4 fallback
+        return client.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": prompt}]
+        ).choices[0].message.content
 
 
 @app.route("/", methods=["GET"])
@@ -17,89 +58,43 @@ def health():
     return jsonify({"status": "ok"})
 
 
-def google_search(query, num=5):
-    """
-    Google Custom Search ile güncel veri çeker.
-    """
-    if not GOOGLE_API_KEY or not GOOGLE_CSE_ID:
-        return []
-
-    url = "https://www.googleapis.com/customsearch/v1"
-    params = {
-        "key": GOOGLE_API_KEY,
-        "cx": GOOGLE_CSE_ID,
-        "q": query,
-        "num": num,
-        "hl": "tr"
-    }
-
-    try:
-        r = requests.get(url, params=params, timeout=8)
-        r.raise_for_status()
-        data = r.json()
-        return data.get("items", [])
-    except Exception:
-        return []
-
-
 @app.route("/ask", methods=["POST"])
 def ask():
+    data = request.json or {}
+    question = data.get("text", "").strip()
+
+    if not question:
+        return jsonify({"error": "EMPTY_QUESTION"}), 400
+
     try:
-        data = request.json or {}
-        user_text = data.get("text", "").strip()
+        item = google_latest_search(question)
 
-        if not user_text:
-            return jsonify({"answer": "Bir soru sorar mısın?"})
+        if not item:
+            return jsonify({
+                "answer": "Güncel ve tarihli bir kaynak bulamadım."
+            })
 
-        # 1️⃣ Önce internete çık
-        search_results = google_search(user_text)
+        title = item.get("title", "")
+        snippet = item.get("snippet", "")
+        link = item.get("link", "")
 
-        context_blocks = []
-        for item in search_results:
-            title = item.get("title", "")
-            snippet = item.get("snippet", "")
-            link = item.get("link", "")
-            context_blocks.append(
-                f"Başlık: {title}\nÖzet: {snippet}\nKaynak: {link}"
-            )
+        prompt = f"""
+Aşağıdaki kaynak en güncel Google sonucudur.
 
-        context_text = "\n\n".join(context_blocks)
+Başlık: {title}
+Özet: {snippet}
+Kaynak: {link}
 
-        # 2️⃣ Modele verilecek mesaj
-        system_prompt = (
-            "Sen bir çocuk robotu (Leko) için çalışan yardımcı bir asistansın.\n"
-            "GÜNCEL bilgi gerekiyorsa sadece verilen kaynaklara dayan.\n"
-            "Emin değilsen bunu açıkça söyle.\n"
-            "ASLA tahmin uydurma.\n"
-            "Kısa, net ve anlaşılır cevap ver."
-        )
+Bu bilgiye dayanarak soruya NET, KISA ve TARİHLİ cevap ver.
+Tahmin etme. Bilgi yoksa açıkça söyle.
+"""
 
-        if context_text:
-            user_prompt = (
-                f"Kullanıcının sorusu:\n{user_text}\n\n"
-                f"Aşağıda internetten bulunan GÜNCEL bilgiler var:\n\n"
-                f"{context_text}\n\n"
-                "Bu bilgilere dayanarak cevap ver."
-            )
-        else:
-            user_prompt = (
-                f"Kullanıcının sorusu:\n{user_text}\n\n"
-                "İnternetten güvenilir ve güncel bir bilgi bulunamadı.\n"
-                "Eğer emin değilsen bunu açıkça belirt."
-            )
+        answer = ask_gpt(prompt)
 
-        # ❗ temperature VERME
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-        )
-
-        answer = response.choices[0].message.content.strip()
-
-        return jsonify({"answer": answer})
+        return jsonify({
+            "answer": answer,
+            "source": link
+        })
 
     except Exception as e:
         return jsonify({
