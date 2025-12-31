@@ -5,21 +5,23 @@ from openai import OpenAI
 
 app = Flask(__name__)
 
-
+# -------------------------------------------------
+# HEALTH
+# -------------------------------------------------
 @app.route("/", methods=["GET"])
 def health():
     return jsonify({"status": "ok"})
 
 
-# ---------------------------
+# -------------------------------------------------
 # GOOGLE WEB SEARCH
-# ---------------------------
+# -------------------------------------------------
 def web_search(query: str) -> str:
     google_key = os.getenv("GOOGLE_API_KEY")
     cse_id = os.getenv("GOOGLE_CSE_ID")
 
     if not google_key or not cse_id:
-        return "Web araması yapılamıyor (Google API ayarlı değil)."
+        return ""
 
     try:
         r = requests.get(
@@ -29,7 +31,7 @@ def web_search(query: str) -> str:
                 "cx": cse_id,
                 "q": query,
                 "hl": "tr",
-                "num": 5
+                "num": 5,
             },
             timeout=8
         )
@@ -38,53 +40,61 @@ def web_search(query: str) -> str:
 
         results = []
         for item in data.get("items", []):
-            results.append(f"{item.get('title')}: {item.get('snippet')}")
+            title = item.get("title", "")
+            snippet = item.get("snippet", "")
+            results.append(f"{title} – {snippet}")
 
-        return "\n".join(results) if results else "Web sonucu bulunamadı."
+        return "\n".join(results)
 
-    except Exception as e:
-        return f"Web araması hatası: {str(e)}"
+    except Exception:
+        return ""
 
 
-# ---------------------------
+# -------------------------------------------------
 # WEB GEREKİR Mİ?
-# ---------------------------
+# -------------------------------------------------
 def needs_web(text: str) -> bool:
-    time_words = [
+    # Hızlı heuristik (ilk filtre)
+    keywords = [
         "bugün", "şu an", "şimdi", "en son", "son",
-        "sonuç", "maç", "ne oldu", "kaç oldu", "güncel"
+        "sonuç", "maç", "ne oldu", "kaç oldu",
+        "güncel", "haber", "dolar", "euro", "altın",
+        "deprem", "seçim"
     ]
 
     lower = text.lower()
-    if any(w in lower for w in time_words):
+    if any(k in lower for k in keywords):
         return True
 
+    # İkinci aşama: modele sor (güvenli)
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         return False
 
     client = OpenAI(api_key=api_key)
 
-    prompt = f"""
-Kullanıcı sorusu:
+    judge_prompt = f"""
+Soru:
 {text}
 
-Bu soru cevaplanırken güncel internet bilgisi gerekir mi?
+Bu soru cevaplanırken GÜNCEL internet bilgisi gerekir mi?
 SADECE EVET veya HAYIR yaz.
 """
 
-    r = client.chat.completions.create(
-        model="gpt-5",
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=3
-    )
+    try:
+        r = client.chat.completions.create(
+            model="gpt-5",
+            messages=[{"role": "user", "content": judge_prompt}],
+            max_completion_tokens=5
+        )
+        return "EVET" in r.choices[0].message.content.upper()
+    except Exception:
+        return False
 
-    return "EVET" in r.choices[0].message.content.upper()
 
-
-# ---------------------------
-# ANA ENDPOINT
-# ---------------------------
+# -------------------------------------------------
+# ASK ENDPOINT
+# -------------------------------------------------
 @app.route("/ask", methods=["POST"])
 def ask():
     try:
@@ -103,23 +113,36 @@ def ask():
         use_web = needs_web(text)
         web_context = web_search(text) if use_web else ""
 
+        # 🔥 KRİTİK PROMPT (WEB OTORİTE)
         final_prompt = f"""
-Kısa, net ve anlaşılır cevap ver.
+Aşağıdaki kurallara UYMAK ZORUNDASIN:
+
+- Eğer "Güncel Web Bilgileri" varsa:
+  → Cevabını SADECE bu bilgilere dayanarak ver
+  → "erişemiyorum", "bilemiyorum" DEME
+  → Web bilgisini özetle
+
+- Eğer web bilgisi yoksa:
+  → Normal genel bilginle cevapla
+
+- Tahmin yapma
+- Kısa, net ve anlaşılır yaz
 
 Soru:
 {text}
 
-{"Güncel web bilgileri:" if web_context else ""}
+{"GÜNCEL WEB BİLGİLERİ:" if web_context else ""}
 {web_context}
 """
 
         response = client.chat.completions.create(
             model="gpt-5",
-            messages=[{"role": "user", "content": final_prompt}]
+            messages=[{"role": "user", "content": final_prompt}],
+            max_completion_tokens=300
         )
 
         return jsonify({
-            "answer": response.choices[0].message.content,
+            "answer": response.choices[0].message.content.strip(),
             "used_web": use_web
         })
 
@@ -130,5 +153,8 @@ Soru:
         }), 500
 
 
+# -------------------------------------------------
+# LOCAL RUN
+# -------------------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
