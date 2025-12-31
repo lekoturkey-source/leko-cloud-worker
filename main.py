@@ -1,139 +1,217 @@
 from flask import Flask, request, jsonify
 import os
+import time
 import requests
 from openai import OpenAI
 
 app = Flask(__name__)
 
-# =========================
-# ENV
-# =========================
+# -------------------------
+# ENV / CLIENTS
+# -------------------------
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 GOOGLE_CSE_ID  = os.getenv("GOOGLE_CSE_ID")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# =========================
+# -------------------------
 # HEALTH
-# =========================
+# -------------------------
 @app.route("/", methods=["GET"])
 def health():
     return jsonify({"status": "ok"})
 
-# =========================
-# HELPERS
-# =========================
-def needs_fresh_info(text: str) -> bool:
+# -------------------------
+# WEB SEARCH (Google CSE)
+# -------------------------
+def google_cse_search(query: str, num: int = 5) -> list[dict]:
     """
-    Anahtar kelimeye bağlı kalmaz.
-    Modelin kendisine sorarak karar verir.
-    """
-    try:
-        r = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Kullanıcı sorusu güncel / canlı bilgi "
-                        "(haber, maç, fiyat, deprem, seçim, hava, son durum vb.) "
-                        "gerektiriyor mu? Sadece EVET veya HAYIR de."
-                    )
-                },
-                {"role": "user", "content": text}
-            ],
-            max_tokens=3
-        )
-        answer = r.choices[0].message.content.lower()
-        return "evet" in answer
-    except:
-        return False
-
-
-def google_search(query: str) -> str:
-    """
-    Google Custom Search
+    Returns a list of {title, link, snippet}.
+    If keys missing or request fails -> empty list.
     """
     if not GOOGLE_API_KEY or not GOOGLE_CSE_ID:
-        return ""
+        return []
 
     url = "https://www.googleapis.com/customsearch/v1"
     params = {
         "key": GOOGLE_API_KEY,
         "cx": GOOGLE_CSE_ID,
         "q": query,
-        "num": 5,
-        "hl": "tr"
+        "num": max(1, min(num, 10)),
+        "hl": "tr",
+        "gl": "tr",
+        "safe": "active",
     }
 
     try:
-        r = requests.get(url, params=params, timeout=10)
+        r = requests.get(url, params=params, timeout=12)
         r.raise_for_status()
         data = r.json()
-        snippets = []
+        items = data.get("items", []) or []
+        out = []
+        for it in items:
+            out.append({
+                "title": it.get("title", ""),
+                "link": it.get("link", ""),
+                "snippet": it.get("snippet", ""),
+            })
+        return out
+    except Exception:
+        return []
 
-        for item in data.get("items", []):
-            snippets.append(
-                f"{item.get('title')}: {item.get('snippet')}"
-            )
-
-        return "\n".join(snippets)
-
-    except:
-        return ""
-
-
-def ask_llm(prompt: str) -> str:
+# -------------------------
+# MODEL SELECTION (fallback)
+# -------------------------
+def chat_with_fallback(messages, max_tokens=400, temperature=0.2) -> str:
     """
-    Önce GPT-5 dene, yoksa GPT-4'e düş
+    Try GPT-5 first; if unavailable/error, fallback to GPT-4o.
     """
-    for model in ["gpt-5", "gpt-4o"]:
+    for model in ("gpt-5", "gpt-4o"):
         try:
-            r = client.chat.completions.create(
+            resp = client.chat.completions.create(
                 model=model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.3
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
             )
-            return r.choices[0].message.content
-        except:
+            return resp.choices[0].message.content or ""
+        except Exception:
             continue
+    return ""
 
-    return "Şu anda cevap veremiyorum."
+# -------------------------
+# DECIDE IF WEB NEEDED
+# -------------------------
+def decide_need_web(user_text: str) -> bool:
+    """
+    Let a small/cheap model decide if fresh/live info is needed.
+    Returns True/False; safe default False.
+    """
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Görevin: Kullanıcı sorusunun güncel/canlı bilgi gerektirip gerektirmediğine karar vermek.\n"
+                        "Güncel/canlı bilgi örnekleri: maç sonucu, son dakika haber, döviz/altın fiyatı, deprem, seçim, "
+                        "bugünkü hava, son durum, bugün/şu an değişen bilgiler.\n"
+                        "Eğer web araması yapılması gerekiyorsa SADECE 'EVET' yaz.\n"
+                        "Gerekli değilse SADECE 'HAYIR' yaz.\n"
+                        "Başka hiçbir şey yazma."
+                    )
+                },
+                {"role": "user", "content": user_text}
+            ],
+            max_tokens=3,
+            temperature=0.0,
+        )
+        ans = (resp.choices[0].message.content or "").strip().lower()
+        return ans.startswith("e")
+    except Exception:
+        return False
 
-# =========================
-# MAIN ENDPOINT
-# =========================
+# -------------------------
+# SUMMARIZE WEB RESULTS
+# -------------------------
+def build_web_context(results: list[dict]) -> str:
+    """
+    Compact context string for the model.
+    """
+    lines = []
+    for i, it in enumerate(results[:5], start=1):
+        title = (it.get("title") or "").strip()
+        link = (it.get("link") or "").strip()
+        snip = (it.get("snippet") or "").strip()
+        if not (title or snip or link):
+            continue
+        # Keep it short; model gets enough to answer.
+        lines.append(f"[{i}] {title}\n{snip}\nKaynak: {link}".strip())
+    return "\n\n".join(lines).strip()
+
+# -------------------------
+# /ask
+# -------------------------
 @app.route("/ask", methods=["POST"])
 def ask():
-    data = request.json or {}
-    text = data.get("text", "").strip()
+    t0 = time.time()
+    try:
+        data = request.json or {}
+        user_text = (data.get("text") or "").strip()
+        if not user_text:
+            return jsonify({"answer": "Bir soru sorabilir misin?"})
 
-    if not text:
-        return jsonify({"answer": "Bir soru sorabilir misin?"})
+        # 1) Decide if we need web
+        need_web = decide_need_web(user_text)
 
-    # 1️⃣ Güncel bilgi gerekiyor mu?
-    fresh = needs_fresh_info(text)
+        web_results = []
+        web_context = ""
+        if need_web:
+            web_results = google_cse_search(user_text, num=5)
+            web_context = build_web_context(web_results)
 
-    # 2️⃣ Gerekirse web'e çık
-    web_context = ""
-    if fresh:
-        web_context = google_search(text)
+        # 2) Prepare final answer prompt
+        if need_web and not web_context:
+            # Web was needed but we couldn't fetch results
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "Sen çocuklara da konuşabilen yardımsever bir asistansın. "
+                        "Kısa, net ve uydurmadan cevap ver. "
+                        "Güncel veri gerektiren sorularda web sonucu yoksa bunu açıkça söyle ve "
+                        "kullanıcıdan netleştirici bilgi (tarih/rakip/şehir vb.) iste."
+                    )
+                },
+                {"role": "user", "content": user_text}
+            ]
+            answer = chat_with_fallback(messages, max_tokens=220, temperature=0.2)
+            if not answer:
+                answer = "Şu an web araması yapamadım. Soru için biraz daha detay verir misin?"
+            return jsonify({"answer": answer})
 
-    # 3️⃣ Final prompt
-    if web_context:
-        prompt = (
-            "Aşağıda web'den alınmış güncel bilgiler var.\n\n"
-            f"{web_context}\n\n"
-            "Bu bilgilere dayanarak kullanıcıya kısa, net ve doğru bir cevap ver:\n"
-            f"Soru: {text}"
-        )
-    else:
-        prompt = text
+        if web_context:
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "Aşağıdaki web arama özetlerini KAYNAK olarak kullanarak yanıt ver. "
+                        "Kesin emin olmadığın şeyi uydurma. "
+                        "Yanıt kısa ve net olsun. Gerekiyorsa 1 cümleyle kaynaklara atıf yap."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Kullanıcı sorusu: {user_text}\n\n"
+                        f"Web arama sonuçları:\n{web_context}\n\n"
+                        "Yanıt:"
+                    )
+                }
+            ]
+        else:
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "Kısa, net ve doğru cevap ver. Uydurma bilgi verme."
+                    )
+                },
+                {"role": "user", "content": user_text}
+            ]
 
-    answer = ask_llm(prompt)
+        answer = chat_with_fallback(messages, max_tokens=260, temperature=0.2)
+        if not answer:
+            answer = "Şu anda cevap veremiyorum, biraz sonra tekrar dener misin?"
 
-    return jsonify({"answer": answer})
+        # Optional: small debug timing (not required by client)
+        _elapsed = time.time() - t0
+        return jsonify({"answer": answer})
+
+    except Exception as e:
+        return jsonify({"error": "INTERNAL_ERROR", "detail": str(e)}), 500
 
 
 if __name__ == "__main__":
