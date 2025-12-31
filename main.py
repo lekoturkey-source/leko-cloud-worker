@@ -1,94 +1,77 @@
 from flask import Flask, request, jsonify
 import os
-import re
 import requests
-from datetime import datetime
 from openai import OpenAI
 
 app = Flask(__name__)
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-GOOGLE_CSE_ID  = os.getenv("GOOGLE_CSE_ID")
+GOOGLE_CSE_ID = os.getenv("GOOGLE_CSE_ID")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# -------------------------------
-# Yardımcılar
-# -------------------------------
-
-def is_sports_question(text: str) -> bool:
-    t = text.lower()
-    return any(k in t for k in [
-        "maç", "kaç kaç", "skor", "kiminle", "son maç", "yendi", "berabere"
-    ])
-
-def clean_child_answer(text: str) -> str:
-    text = re.sub(r"\[.*?\]", "", text)
-    text = re.sub(r"http\S+", "", text)
-    text = text.strip()
-    return text[:300]
-
-def extract_score_from_html(html: str):
-    patterns = [
-        r"(\d+)\s*-\s*(\d+)",
-        r"(\d+)\s*–\s*(\d+)"
-    ]
-    for p in patterns:
-        m = re.search(p, html)
-        if m:
-            return f"{m.group(1)}-{m.group(2)}"
-    return None
-
-def google_search(query: str):
-    url = "https://www.googleapis.com/customsearch/v1"
-    params = {
-        "key": GOOGLE_API_KEY,
-        "cx": GOOGLE_CSE_ID,
-        "q": query,
-        "sort": "date",
-        "num": 5
-    }
-    r = requests.get(url, params=params, timeout=10)
-    r.raise_for_status()
-    return r.json().get("items", [])
-
-def find_latest_match_answer(query: str):
-    items = google_search(query)
-
-    now = datetime.now()
-    best = None
-    best_date = None
-
-    for item in items:
-        snippet = item.get("snippet", "")
-        link = item.get("link")
-
-        year_match = re.search(r"(20\d{2})", snippet)
-        if year_match:
-            year = int(year_match.group(1))
-            if abs(now.year - year) > 1:
-                continue
-
-        try:
-            html = requests.get(link, timeout=10).text
-        except:
-            continue
-
-        score = extract_score_from_html(html)
-        if score:
-            best = f"En son maç {score} bitti."
-            break
-
-    return best
-
-# -------------------------------
-# Routes
-# -------------------------------
 
 @app.route("/", methods=["GET"])
 def health():
     return jsonify({"status": "ok"})
+
+
+def google_search(query):
+    """
+    Google Custom Search:
+    - en yeni sonuçlar üstte
+    - tarih sadece sıralama için
+    """
+    try:
+        url = "https://www.googleapis.com/customsearch/v1"
+        params = {
+            "key": GOOGLE_API_KEY,
+            "cx": GOOGLE_CSE_ID,
+            "q": query,
+            "num": 5,
+            "sort": "date"
+        }
+        r = requests.get(url, params=params, timeout=5)
+        r.raise_for_status()
+        data = r.json()
+
+        snippets = []
+        for item in data.get("items", []):
+            snippet = item.get("snippet")
+            if snippet:
+                snippets.append(snippet)
+
+        return " ".join(snippets)
+
+    except Exception:
+        return ""
+
+
+def ask_llm(question, context):
+    """
+    KISA + ÇOCUK DOSTU + KAYNAKSIZ
+    """
+    system_prompt = (
+        "7 yaşındaki bir çocuğa anlatır gibi cevap ver.\n"
+        "Tek cümle olsun.\n"
+        "Kısa olsun.\n"
+        "Kaynak, tarih, site adı yazma.\n"
+        "Emin değilsen açıkça 'Bunu net bulamadım.' de."
+    )
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"Soru: {question}\nBilgi: {context}"}
+    ]
+
+    response = client.chat.completions.create(
+        model="gpt-5",
+        messages=messages
+    )
+
+    return response.choices[0].message.content.strip()
+
 
 @app.route("/ask", methods=["POST"])
 def ask():
@@ -97,38 +80,23 @@ def ask():
         text = data.get("text", "").strip()
 
         if not text:
-            return jsonify({"answer": "Bir şey sorabilir misin?"})
+            return jsonify({"answer": "Bunu anlayamadım."})
 
-        # 1️⃣ Spor / maç sorusuysa → Google + sayfa içi skor
-        if is_sports_question(text):
-            match_answer = find_latest_match_answer(text)
-            if match_answer:
-                return jsonify({"answer": match_answer})
+        # 1️⃣ Google'dan en güncel bilgiyi çek
+        context = google_search(text)
 
-        # 2️⃣ Genel güncel bilgi → GPT + Web Tool mantığı
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Sen çocuklara konuşan bir yardımcı robottun. "
-                        "Cevaplar kısa, net ve güvenilir olmalı. "
-                        "Bilmiyorsan uydurma. "
-                        "Kaynak, site adı veya link söyleme."
-                    )
-                },
-                {"role": "user", "content": text}
-            ]
-        )
+        # 2️⃣ Hiçbir şey bulunamazsa
+        if not context:
+            return jsonify({"answer": "Bunu net bulamadım."})
 
-        answer = response.choices[0].message.content
-        return jsonify({"answer": clean_child_answer(answer)})
+        # 3️⃣ LLM ile kısa çocuk dostu cevap üret
+        answer = ask_llm(text, context)
 
-    except Exception as e:
+        return jsonify({"answer": answer})
+
+    except Exception:
         return jsonify({
-            "error": "INTERNAL_ERROR",
-            "detail": str(e)
+            "answer": "Şu anda buna cevap veremiyorum."
         }), 500
 
 
