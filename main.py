@@ -5,9 +5,7 @@ from openai import OpenAI
 
 app = Flask(__name__)
 
-# ---------------------------
-# HEALTH
-# ---------------------------
+
 @app.route("/", methods=["GET"])
 def health():
     return jsonify({"status": "ok"})
@@ -38,11 +36,14 @@ def web_search(query: str) -> str:
         r.raise_for_status()
         data = r.json()
 
-        snippets = []
+        results = []
         for item in data.get("items", []):
-            snippets.append(f"{item.get('title')}: {item.get('snippet')}")
+            title = item.get("title", "")
+            snippet = item.get("snippet", "")
+            if title or snippet:
+                results.append(f"{title}: {snippet}")
 
-        return "\n".join(snippets)
+        return "\n".join(results)
 
     except Exception:
         return ""
@@ -52,21 +53,21 @@ def web_search(query: str) -> str:
 # WEB GEREKİR Mİ?
 # ---------------------------
 def needs_web(text: str) -> bool:
-    triggers = [
-        "bugün", "şu an", "şimdi", "en son", "son",
-        "sonuç", "maç", "ne oldu", "kaç oldu", "güncel"
+    keywords = [
+        "bugün", "şu an", "şimdi", "en son",
+        "son", "sonuç", "maç", "kaç oldu", "güncel"
     ]
-    return any(t in text.lower() for t in triggers)
+    return any(k in text.lower() for k in keywords)
 
 
 # ---------------------------
-# ASK ENDPOINT
+# ANA ENDPOINT
 # ---------------------------
 @app.route("/ask", methods=["POST"])
 def ask():
     try:
-        data = request.json or {}
-        text = data.get("text", "").strip()
+        payload = request.json or {}
+        text = payload.get("text", "").strip()
 
         if not text:
             return jsonify({"answer": "Bir soru sorar mısın?"})
@@ -81,31 +82,37 @@ def ask():
         web_context = web_search(text) if use_web else ""
 
         prompt = f"""
-Aşağıda web bilgileri varsa, cevabını SADECE bu bilgilere dayanarak ver.
-Cevap BOŞ OLAMAZ.
-Tahmin yapma ama mutlaka özet çıkar.
+Aşağıdaki soruya MUTLAKA cevap ver.
+Cevap boş OLAMAZ.
+Türkçe yaz.
+Kısa ve net ol.
 
 Soru:
 {text}
 
-WEB:
-{web_context if web_context else "Web bilgisi bulunamadı."}
+Güncel bilgiler:
+{web_context if web_context else "Web bilgisi yok."}
 """
 
         response = client.chat.completions.create(
-            model="gpt-5",
+            model="gpt-5-mini",
             messages=[{"role": "user", "content": prompt}],
-            max_completion_tokens=200
+            max_completion_tokens=300
         )
 
-        answer = response.choices[0].message.content.strip()
+        # 🔒 Güvenli cevap çıkarma
+        answer = ""
+        if response.choices:
+            msg = response.choices[0].message
+            if msg and msg.content:
+                answer = msg.content.strip()
 
-        # 🔥 KRİTİK KORUMA
+        # 🔥 Son emniyet (ASLA boş dönmez)
         if not answer:
             if web_context:
-                answer = "Web sonuçlarına göre bu konuda net bir özet bulunamadı."
+                answer = "Güncel web kaynaklarında bu soruya dair net bir bilgi bulunamadı."
             else:
-                answer = "Bu soruya şu anda net bir cevap veremiyorum."
+                answer = "Bu soruya şu anda güvenilir bir cevap veremiyorum."
 
         return jsonify({
             "answer": answer,
