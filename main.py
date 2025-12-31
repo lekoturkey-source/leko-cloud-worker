@@ -5,121 +5,135 @@ from openai import OpenAI
 
 app = Flask(__name__)
 
-# ---------------------------
-# HEALTH CHECK
-# ---------------------------
+# =========================
+# ENV
+# =========================
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+GOOGLE_CSE_ID  = os.getenv("GOOGLE_CSE_ID")
+
+client = OpenAI(api_key=OPENAI_API_KEY)
+
+# =========================
+# HEALTH
+# =========================
 @app.route("/", methods=["GET"])
 def health():
     return jsonify({"status": "ok"})
 
+# =========================
+# HELPERS
+# =========================
+def needs_fresh_info(text: str) -> bool:
+    """
+    Anahtar kelimeye bağlı kalmaz.
+    Modelin kendisine sorarak karar verir.
+    """
+    try:
+        r = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Kullanıcı sorusu güncel / canlı bilgi "
+                        "(haber, maç, fiyat, deprem, seçim, hava, son durum vb.) "
+                        "gerektiriyor mu? Sadece EVET veya HAYIR de."
+                    )
+                },
+                {"role": "user", "content": text}
+            ],
+            max_tokens=3
+        )
+        answer = r.choices[0].message.content.lower()
+        return "evet" in answer
+    except:
+        return False
 
-# ---------------------------
-# GOOGLE WEB SEARCH
-# ---------------------------
-def web_search(query: str) -> str:
-    google_key = os.getenv("GOOGLE_API_KEY")
-    cse_id = os.getenv("GOOGLE_CSE_ID")
 
-    if not google_key or not cse_id:
-        return "Güncel web bilgisine erişilemiyor."
+def google_search(query: str) -> str:
+    """
+    Google Custom Search
+    """
+    if not GOOGLE_API_KEY or not GOOGLE_CSE_ID:
+        return ""
+
+    url = "https://www.googleapis.com/customsearch/v1"
+    params = {
+        "key": GOOGLE_API_KEY,
+        "cx": GOOGLE_CSE_ID,
+        "q": query,
+        "num": 5,
+        "hl": "tr"
+    }
 
     try:
-        r = requests.get(
-            "https://www.googleapis.com/customsearch/v1",
-            params={
-                "key": google_key,
-                "cx": cse_id,
-                "q": query,
-                "hl": "tr",
-                "num": 5
-            },
-            timeout=8
-        )
+        r = requests.get(url, params=params, timeout=10)
         r.raise_for_status()
         data = r.json()
+        snippets = []
 
-        results = []
         for item in data.get("items", []):
-            results.append(f"{item.get('title')}: {item.get('snippet')}")
+            snippets.append(
+                f"{item.get('title')}: {item.get('snippet')}"
+            )
 
-        return "\n".join(results) if results else "Güncel sonuç bulunamadı."
+        return "\n".join(snippets)
 
-    except Exception:
-        return "Web araması sırasında hata oluştu."
-
-
-# ---------------------------
-# WEB GEREKİR Mİ? (KESİN KARAR)
-# ---------------------------
-def needs_web(text: str) -> bool:
-    t = text.lower()
-
-    if any(w in t for w in [
-        "kim", "nedir", "ne oldu", "kaç",
-        "bugün", "şimdi", "en son", "haftaya",
-        "yarın", "hava", "maç", "bakan",
-        "seçim", "sonuç", "deprem", "kur"
-    ]):
-        return True
-
-    # Varsayılan: WEB'E ÇIK
-    return True
+    except:
+        return ""
 
 
-# ---------------------------
-# ANA ENDPOINT
-# ---------------------------
+def ask_llm(prompt: str) -> str:
+    """
+    Önce GPT-5 dene, yoksa GPT-4'e düş
+    """
+    for model in ["gpt-5", "gpt-4o"]:
+        try:
+            r = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3
+            )
+            return r.choices[0].message.content
+        except:
+            continue
+
+    return "Şu anda cevap veremiyorum."
+
+# =========================
+# MAIN ENDPOINT
+# =========================
 @app.route("/ask", methods=["POST"])
-print("### LEKO CLOUD WORKER v2 – WEB ALWAYS ON ###")
 def ask():
-    try:
-        data = request.json or {}
-        text = data.get("text", "").strip()
+    data = request.json or {}
+    text = data.get("text", "").strip()
 
-        if not text:
-            return jsonify({"answer": "Bir soru sorar mısın?"})
+    if not text:
+        return jsonify({"answer": "Bir soru sorabilir misin?"})
 
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            return jsonify({"answer": "AI servisi hazır değil."})
+    # 1️⃣ Güncel bilgi gerekiyor mu?
+    fresh = needs_fresh_info(text)
 
-        client = OpenAI(api_key=api_key)
+    # 2️⃣ Gerekirse web'e çık
+    web_context = ""
+    if fresh:
+        web_context = google_search(text)
 
-        use_web = needs_web(text)
-        web_context = web_search(text) if use_web else ""
-
-        prompt = f"""
-Kısa, net ve doğru cevap ver.
-Emin değilsen bunu açıkça söyle, uydurma.
-
-Soru:
-{text}
-
-{"Güncel web bilgileri:" if web_context else ""}
-{web_context}
-"""
-
-        response = client.chat.completions.create(
-            model="gpt-5-mini",
-            messages=[{"role": "user", "content": prompt}],
-            max_completion_tokens=200
+    # 3️⃣ Final prompt
+    if web_context:
+        prompt = (
+            "Aşağıda web'den alınmış güncel bilgiler var.\n\n"
+            f"{web_context}\n\n"
+            "Bu bilgilere dayanarak kullanıcıya kısa, net ve doğru bir cevap ver:\n"
+            f"Soru: {text}"
         )
+    else:
+        prompt = text
 
-        answer = response.choices[0].message.content.strip()
+    answer = ask_llm(prompt)
 
-        if not answer:
-            answer = "Bu soruya şu anda net bir cevap veremiyorum."
-
-        return jsonify({
-            "answer": answer,
-            "used_web": use_web
-        })
-
-    except Exception as e:
-        return jsonify({
-            "error": "INTERNAL_ERROR",
-            "detail": str(e)
-        }), 500
+    return jsonify({"answer": answer})
 
 
 if __name__ == "__main__":
