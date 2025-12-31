@@ -5,17 +5,17 @@ from openai import OpenAI
 
 app = Flask(__name__)
 
-# -------------------------------------------------
+# ---------------------------
 # HEALTH
-# -------------------------------------------------
+# ---------------------------
 @app.route("/", methods=["GET"])
 def health():
     return jsonify({"status": "ok"})
 
 
-# -------------------------------------------------
+# ---------------------------
 # GOOGLE WEB SEARCH
-# -------------------------------------------------
+# ---------------------------
 def web_search(query: str) -> str:
     google_key = os.getenv("GOOGLE_API_KEY")
     cse_id = os.getenv("GOOGLE_CSE_ID")
@@ -31,70 +31,37 @@ def web_search(query: str) -> str:
                 "cx": cse_id,
                 "q": query,
                 "hl": "tr",
-                "num": 5,
+                "num": 5
             },
             timeout=8
         )
         r.raise_for_status()
         data = r.json()
 
-        results = []
+        snippets = []
         for item in data.get("items", []):
-            title = item.get("title", "")
-            snippet = item.get("snippet", "")
-            results.append(f"{title} – {snippet}")
+            snippets.append(f"{item.get('title')}: {item.get('snippet')}")
 
-        return "\n".join(results)
+        return "\n".join(snippets)
 
     except Exception:
         return ""
 
 
-# -------------------------------------------------
+# ---------------------------
 # WEB GEREKİR Mİ?
-# -------------------------------------------------
+# ---------------------------
 def needs_web(text: str) -> bool:
-    # Hızlı heuristik (ilk filtre)
-    keywords = [
+    triggers = [
         "bugün", "şu an", "şimdi", "en son", "son",
-        "sonuç", "maç", "ne oldu", "kaç oldu",
-        "güncel", "haber", "dolar", "euro", "altın",
-        "deprem", "seçim"
+        "sonuç", "maç", "ne oldu", "kaç oldu", "güncel"
     ]
-
-    lower = text.lower()
-    if any(k in lower for k in keywords):
-        return True
-
-    # İkinci aşama: modele sor (güvenli)
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        return False
-
-    client = OpenAI(api_key=api_key)
-
-    judge_prompt = f"""
-Soru:
-{text}
-
-Bu soru cevaplanırken GÜNCEL internet bilgisi gerekir mi?
-SADECE EVET veya HAYIR yaz.
-"""
-
-    try:
-        r = client.chat.completions.create(
-            model="gpt-5",
-            messages=[{"role": "user", "content": judge_prompt}],
-            max_completion_tokens=5
-        )
-        return "EVET" in r.choices[0].message.content.upper()
-    except Exception:
-        return False
+    return any(t in text.lower() for t in triggers)
 
 
-# -------------------------------------------------
+# ---------------------------
 # ASK ENDPOINT
-# -------------------------------------------------
+# ---------------------------
 @app.route("/ask", methods=["POST"])
 def ask():
     try:
@@ -106,43 +73,42 @@ def ask():
 
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
-            return jsonify({"answer": "AI servisi şu anda hazır değil."})
+            return jsonify({"answer": "AI servisi hazır değil."})
 
         client = OpenAI(api_key=api_key)
 
         use_web = needs_web(text)
         web_context = web_search(text) if use_web else ""
 
-        # 🔥 KRİTİK PROMPT (WEB OTORİTE)
-        final_prompt = f"""
-Aşağıdaki kurallara UYMAK ZORUNDASIN:
-
-- Eğer "Güncel Web Bilgileri" varsa:
-  → Cevabını SADECE bu bilgilere dayanarak ver
-  → "erişemiyorum", "bilemiyorum" DEME
-  → Web bilgisini özetle
-
-- Eğer web bilgisi yoksa:
-  → Normal genel bilginle cevapla
-
-- Tahmin yapma
-- Kısa, net ve anlaşılır yaz
+        prompt = f"""
+Aşağıda web bilgileri varsa, cevabını SADECE bu bilgilere dayanarak ver.
+Cevap BOŞ OLAMAZ.
+Tahmin yapma ama mutlaka özet çıkar.
 
 Soru:
 {text}
 
-{"GÜNCEL WEB BİLGİLERİ:" if web_context else ""}
-{web_context}
+WEB:
+{web_context if web_context else "Web bilgisi bulunamadı."}
 """
 
         response = client.chat.completions.create(
             model="gpt-5",
-            messages=[{"role": "user", "content": final_prompt}],
-            max_completion_tokens=300
+            messages=[{"role": "user", "content": prompt}],
+            max_completion_tokens=200
         )
 
+        answer = response.choices[0].message.content.strip()
+
+        # 🔥 KRİTİK KORUMA
+        if not answer:
+            if web_context:
+                answer = "Web sonuçlarına göre bu konuda net bir özet bulunamadı."
+            else:
+                answer = "Bu soruya şu anda net bir cevap veremiyorum."
+
         return jsonify({
-            "answer": response.choices[0].message.content.strip(),
+            "answer": answer,
             "used_web": use_web
         })
 
@@ -153,8 +119,5 @@ Soru:
         }), 500
 
 
-# -------------------------------------------------
-# LOCAL RUN
-# -------------------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
