@@ -32,12 +32,7 @@ def health():
 # ==============================
 # LLM: GÜNCEL Mİ?
 # ==============================
-
 def llm_needs_live_data(text: str) -> bool:
-    """
-    Model kendisi karar verir:
-    Bu soru cevaplanırken internet gerekir mi?
-    """
     r = client.chat.completions.create(
         model=MODEL_DECIDE,
         temperature=0,
@@ -45,10 +40,14 @@ def llm_needs_live_data(text: str) -> bool:
             {
                 "role": "system",
                 "content": (
-                    "Kullanıcı sorusunu değerlendir.\n"
-                    "Eğer cevap için güncel, gerçek zamanlı, "
-                    "internet verisi gerekiyorsa sadece EVET yaz.\n"
-                    "Gerekli değilse sadece HAYIR yaz."
+                    "Bir kullanıcı sorusu alacaksın.\n\n"
+                    "Eğer soru:\n"
+                    "- zaman bağımlıysa\n"
+                    "- 'en son', 'şu an', 'bugün', 'güncel', 'ne oldu', 'son durum'\n"
+                    "- sonuç, skor, fiyat, olay, haber gibi DEĞİŞEBİLEN bilgi istiyorsa\n\n"
+                    "Bu soruya cevap verebilmek için MUTLAKA internet gerekir.\n\n"
+                    "Bu durumda sadece EVET yaz.\n"
+                    "Aksi halde sadece HAYIR yaz."
                 )
             },
             {"role": "user", "content": text}
@@ -56,6 +55,8 @@ def llm_needs_live_data(text: str) -> bool:
     )
 
     return "EVET" in r.choices[0].message.content.upper()
+
+
 
 # ==============================
 # GOOGLE CSE
