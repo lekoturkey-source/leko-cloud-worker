@@ -1,124 +1,110 @@
-
 from flask import Flask, request, jsonify
 import os
+import requests
 from openai import OpenAI
 
 app = Flask(__name__)
 
-# -------------------------------------------------
-# GÜNCEL BİLGİ GEREKİYOR MU?
-# (MODEL KENDİ KARAR VERİR)
-# -------------------------------------------------
-def model_needs_web(client: OpenAI, text: str) -> bool:
-    """
-    Bu fonksiyon kelime listesi kullanmaz.
-    Modelden sadece EVET / HAYIR cevabı alır.
-    """
-    try:
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Aşağıdaki soruya SADECE 'EVET' veya 'HAYIR' diye cevap ver. "
-                        "Bu soru zaman-duyarlı veya güncel bilgi gerektiriyor mu?"
-                    )
-                },
-                {
-                    "role": "user",
-                    "content": text
-                }
-            ],
-            max_tokens=3,
-        )
+# ENV
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+GOOGLE_CSE_ID = os.getenv("GOOGLE_CSE_ID")
 
-        answer = resp.choices[0].message.content.strip().upper()
-        return answer.startswith("E")
-
-    except Exception:
-        # Karar alınamazsa güvenli tarafta kal
-        return False
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 
-# -------------------------------------------------
-# SAĞLIK KONTROLÜ
-# -------------------------------------------------
 @app.route("/", methods=["GET"])
 def health():
     return jsonify({"status": "ok"})
 
 
-# -------------------------------------------------
-# ANA API
-# -------------------------------------------------
+# ---------------------------
+# GOOGLE WEB SEARCH
+# ---------------------------
+def web_search(query: str) -> str:
+    try:
+        r = requests.get(
+            "https://www.googleapis.com/customsearch/v1",
+            params={
+                "key": GOOGLE_API_KEY,
+                "cx": GOOGLE_CSE_ID,
+                "q": query,
+                "hl": "tr",
+                "num": 5
+            },
+            timeout=8
+        )
+        r.raise_for_status()
+        data = r.json()
+
+        results = []
+        for item in data.get("items", []):
+            results.append(
+                f"{item.get('title')}: {item.get('snippet')}"
+            )
+
+        return "\n".join(results) if results else "Web sonucu bulunamadı."
+
+    except Exception as e:
+        return f"Web araması yapılamadı: {str(e)}"
+
+
+# ---------------------------
+# AKIL: WEB GEREKİYOR MU?
+# ---------------------------
+def needs_web(text: str) -> bool:
+    prompt = f"""
+Kullanıcı sorusu:
+{text}
+
+Bu soruyu cevaplamak için GÜNCEL / CANLI / BUGÜNE AİT internet bilgisi gerekir mi?
+
+Sadece EVET veya HAYIR yaz.
+"""
+    r = client.chat.completions.create(
+        model="gpt-5",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=3
+    )
+    return "EVET" in r.choices[0].message.content.upper()
+
+
 @app.route("/ask", methods=["POST"])
 def ask():
     try:
         data = request.json or {}
-        text = (data.get("text") or "").strip()
+        text = data.get("text", "").strip()
 
         if not text:
-            return jsonify({"answer": "Bir soru sorabilir misin?"})
+            return jsonify({"answer": "Bir soru sorar mısın?"})
 
-        # API KEY
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            return jsonify({"error": "OPENAI_API_KEY_NOT_FOUND"}), 500
+        # 1️⃣ Web gerekir mi?
+        use_web = needs_web(text)
 
-        client = OpenAI(api_key=api_key)
+        web_context = ""
+        if use_web:
+            web_context = web_search(text)
 
-        # -------------------------------------------------
-        # MODEL KARARI: GÜNCEL Mİ?
-        # -------------------------------------------------
-        needs_web = model_needs_web(client, text)
+        # 2️⃣ Ana cevap
+        final_prompt = f"""
+Bir çocuğa veya sade bir kullanıcıya konuşuyorsun.
+Kısa, net ve anlaşılır cevap ver.
 
-        # -------------------------------------------------
-        # SİSTEM PROMPT
-        # -------------------------------------------------
-        system_prompt = (
-            "Sen çocuklara konuşan güvenli bir asistansın. "
-            "Cevapların kısa, sade ve anlaşılır olsun. "
+Soru:
+{text}
+
+{"Güncel web bilgileri:" if web_context else ""}
+{web_context}
+"""
+
+        response = client.chat.completions.create(
+            model="gpt-5",
+            messages=[{"role": "user", "content": final_prompt}]
         )
 
-        if needs_web:
-            system_prompt += (
-                "Bu soru GÜNCEL bilgi gerektiriyor. "
-                "Emin olmadığın yerde tahmin yapma. "
-                "Kesin bilgi yoksa bunu açıkça söyle. "
-                "Yanlış veya uydurma bilgi verme."
-            )
-        else:
-            system_prompt += (
-                "Bu soru genel bilgidir. "
-                "Net ve doğru cevap ver."
-            )
-
-        # -------------------------------------------------
-        # MODEL SEÇİMİ (GERİYE DÖNÜŞ GÜVENLİ)
-        # -------------------------------------------------
-        model_name = os.getenv("OPENAI_MODEL", "gpt-5")
-
-        try:
-            response = client.chat.completions.create(
-                model=model_name,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": text}
-                ],
-            )
-        except Exception:
-            # GPT-5 erişilemezse otomatik düş
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": text}
-                ],
-            )
-
         return jsonify({
-            "answer": response.choices[0].message.content
+            "answer": response.choices[0].message.content,
+            "used_web": use_web
         })
 
     except Exception as e:
@@ -128,8 +114,6 @@ def ask():
         }), 500
 
 
-# -------------------------------------------------
-# LOCAL ÇALIŞMA
-# -------------------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
+
