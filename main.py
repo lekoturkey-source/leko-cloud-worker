@@ -70,6 +70,7 @@ def needs_web(text: str) -> bool:
 # ANA ENDPOINT
 # ---------------------------
 @app.route("/ask", methods=["POST"])
+print("### LEKO CLOUD WORKER v2 – WEB ALWAYS ON ###")
 def ask():
     try:
         data = request.json or {}
