@@ -2,110 +2,155 @@ from flask import Flask, request, jsonify
 import os
 import requests
 from openai import OpenAI
-from datetime import datetime
 
-app = Flask(__name__)
+# ==============================
+# CONFIG
+# ==============================
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-GOOGLE_CSE_ID = os.getenv("GOOGLE_CSE_ID")
+GOOGLE_CSE_ID  = os.getenv("GOOGLE_CSE_ID")
+
+if not OPENAI_API_KEY:
+    raise RuntimeError("OPENAI_API_KEY missing")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
+MODEL_MAIN   = "gpt-5"        # gpt-4 / gpt-4o-mini / gpt-5 → değiştirilebilir
+MODEL_DECIDE = "gpt-4o-mini" # hızlı ve ucuz karar modeli
 
-def search_latest_fenerbahce_match():
-    """
-    Google CSE üzerinden Fenerbahçe'nin en son futbol maçını bulur
-    """
-    query = "Fenerbahçe son oynanan futbol maçı sonucu"
+app = Flask(__name__)
 
-    url = "https://www.googleapis.com/customsearch/v1"
-    params = {
-        "key": GOOGLE_API_KEY,
-        "cx": GOOGLE_CSE_ID,
-        "q": query,
-        "num": 5,
-        "hl": "tr"
-    }
-
-    r = requests.get(url, params=params, timeout=10)
-    r.raise_for_status()
-    data = r.json()
-
-    latest_event = None
-    latest_date = None
-
-    for item in data.get("items", []):
-        pagemap = item.get("pagemap", {})
-
-        for event in pagemap.get("SportsEvent", []):
-            name = event.get("name", "")
-            start = event.get("startDate")
-
-            if not name or not start:
-                continue
-
-            try:
-                event_date = datetime.fromisoformat(start.replace("Z", ""))
-            except Exception:
-                continue
-
-            if latest_date is None or event_date > latest_date:
-                latest_date = event_date
-                latest_event = {
-                    "name": name,
-                    "date": event_date.strftime("%d %B %Y"),
-                    "url": event.get("url")
-                }
-
-    return latest_event
-
+# ==============================
+# HEALTH
+# ==============================
 
 @app.route("/", methods=["GET"])
 def health():
     return jsonify({"status": "ok"})
 
+# ==============================
+# LLM: GÜNCEL Mİ?
+# ==============================
+
+def llm_needs_live_data(text: str) -> bool:
+    """
+    Model kendisi karar verir:
+    Bu soru cevaplanırken internet gerekir mi?
+    """
+    r = client.chat.completions.create(
+        model=MODEL_DECIDE,
+        temperature=0,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Kullanıcı sorusunu değerlendir.\n"
+                    "Eğer cevap için güncel, gerçek zamanlı, "
+                    "internet verisi gerekiyorsa sadece EVET yaz.\n"
+                    "Gerekli değilse sadece HAYIR yaz."
+                )
+            },
+            {"role": "user", "content": text}
+        ]
+    )
+
+    return "EVET" in r.choices[0].message.content.upper()
+
+# ==============================
+# GOOGLE CSE
+# ==============================
+
+def web_search(query: str):
+    r = requests.get(
+        "https://www.googleapis.com/customsearch/v1",
+        params={
+            "key": GOOGLE_API_KEY,
+            "cx": GOOGLE_CSE_ID,
+            "q": query,
+            "hl": "tr",
+            "num": 5
+        },
+        timeout=10
+    )
+    r.raise_for_status()
+    return r.json().get("items", [])
+
+# ==============================
+# WEB SONUÇLARINI ANLAT
+# ==============================
+
+def summarize_web(question: str, items: list) -> str:
+    sources = "\n\n".join(
+        f"Kaynak: {i.get('title','')}\n{i.get('snippet','')}"
+        for i in items
+    )
+
+    r = client.chat.completions.create(
+        model=MODEL_MAIN,
+        temperature=0.2,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Aşağıda güncel internet kaynaklarından alınmış bilgiler var.\n"
+                    "Yanlış veya uydurma bilgi ekleme.\n"
+                    "Sadece bu bilgilerden yola çıkarak cevap ver.\n"
+                    "Emin değilsen bunu açıkça söyle."
+                )
+            },
+            {
+                "role": "user",
+                "content": f"Soru: {question}\n\nBilgiler:\n{sources}"
+            }
+        ]
+    )
+
+    return r.choices[0].message.content.strip()
+
+# ==============================
+# NORMAL CHAT
+# ==============================
+
+def normal_answer(text: str) -> str:
+    r = client.chat.completions.create(
+        model=MODEL_MAIN,
+        temperature=0.4,
+        messages=[{"role": "user", "content": text}]
+    )
+    return r.choices[0].message.content.strip()
+
+# ==============================
+# ASK ENDPOINT
+# ==============================
 
 @app.route("/ask", methods=["POST"])
 def ask():
-    data = request.json or {}
-    user_text = data.get("text", "").strip()
-
     try:
-        match_info = None
+        data = request.json or {}
+        text = data.get("text", "").strip()
 
-        if "fenerbahçe" in user_text.lower() and "maç" in user_text.lower():
-            match_info = search_latest_fenerbahce_match()
+        if not text:
+            return jsonify({"answer": "Bir soru sorabilir misin?"})
 
-        if match_info:
-            system_prompt = f"""
-Aşağıda internetten alınmış GÜNCEL ve DOĞRU bir maç bilgisi var.
+        # 1️⃣ Model karar versin
+        needs_live = llm_needs_live_data(text)
 
-Maç: {match_info['name']}
-Tarih: {match_info['date']}
+        # 2️⃣ GÜNCEL BİLGİ
+        if needs_live and GOOGLE_API_KEY and GOOGLE_CSE_ID:
+            items = web_search(text)
 
-Bu bilgiye dayanarak kullanıcıya NET ve KISA cevap ver.
-Tahmin yapma, uydurma ekleme.
-"""
+            if not items:
+                return jsonify({
+                    "answer": "Bu konuda internette güncel ve güvenilir bir bilgi bulamadım."
+                })
 
-        else:
-            system_prompt = """
-Kullanıcının sorusuna genel bilgiyle cevap ver.
-Güncel veri yoksa bunu açıkça söyle.
-"""
+            answer = summarize_web(text, items)
+            return jsonify({"answer": answer})
 
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",  # gpt-5 yoksa bile hata vermez
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_text}
-            ],
-            temperature=0.2
-        )
-
-        return jsonify({
-            "answer": response.choices[0].message.content
-        })
+        # 3️⃣ STATİK BİLGİ
+        answer = normal_answer(text)
+        return jsonify({"answer": answer})
 
     except Exception as e:
         return jsonify({
@@ -113,6 +158,9 @@ Güncel veri yoksa bunu açıkça söyle.
             "detail": str(e)
         }), 500
 
+# ==============================
+# MAIN
+# ==============================
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
