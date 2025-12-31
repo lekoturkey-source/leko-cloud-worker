@@ -89,7 +89,6 @@ def summarize_web(question: str, items: list) -> str:
 
     r = client.chat.completions.create(
         model=MODEL_MAIN,
-        temperature=0.2,
         messages=[
             {
                 "role": "system",
@@ -108,6 +107,7 @@ def summarize_web(question: str, items: list) -> str:
     )
 
     return r.choices[0].message.content.strip()
+
 
 # ==============================
 # NORMAL CHAT
