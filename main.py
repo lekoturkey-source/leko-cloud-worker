@@ -1,83 +1,108 @@
 from flask import Flask, request, jsonify
 import os
 import requests
+import urllib.parse
 from openai import OpenAI
+from datetime import datetime
 
 app = Flask(__name__)
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-GOOGLE_CSE_ID  = os.getenv("GOOGLE_CSE_ID")
+OPENAI_KEY = os.getenv("OPENAI_API_KEY")
+GOOGLE_KEY = os.getenv("GOOGLE_API_KEY")
+GOOGLE_CSE = os.getenv("GOOGLE_CSE_ID")
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+client = OpenAI(api_key=OPENAI_KEY)
 
-# =========================
-# GOOGLE WEB SEARCH
-# =========================
-def google_search(query):
-    r = requests.get(
-        "https://www.googleapis.com/customsearch/v1",
-        params={
-            "key": GOOGLE_API_KEY,
-            "cx": GOOGLE_CSE_ID,
-            "q": query,
-            "num": 5,
-            "sort": "date"
-        },
-        timeout=6
-    )
-    return r.json().get("items", [])
+# -----------------------------
+# Güncel soru mu?
+# -----------------------------
+def is_current_question(text: str) -> bool:
+    keywords = [
+        "bugün", "dün", "yarın", "şimdi", "son", "en son",
+        "hava", "maç", "kaç oldu", "dolar", "euro",
+        "okul", "tatil", "bakan", "başkan"
+    ]
+    t = text.lower()
+    return any(k in t for k in keywords)
 
-# =========================
-# LLM – SADE ÖZET
-# =========================
-def summarize_for_child(question, web_text):
-    system_prompt = (
-        "7 yaşındaki bir çocuğa anlatır gibi cevap ver. "
-        "Kısa olsun. Kaynak, site adı veya tarih söyleme. "
-        "en güncel hangisi ise onu söyle"
-        "şuan tarihin kaç olduğu bul ve aramaya bu tarihten geriye doğru başla"
+# -----------------------------
+# Google Search
+# -----------------------------
+def google_search(query: str):
+    if not GOOGLE_KEY or not GOOGLE_CSE:
+        return None
+
+    q = urllib.parse.quote(query)
+    url = (
+        f"https://www.googleapis.com/customsearch/v1"
+        f"?key={GOOGLE_KEY}&cx={GOOGLE_CSE}&q={q}&num=5"
     )
 
-    response = client.chat.completions.create(
-        model="gpt-5",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": f"Soru: {question}\n\nİnternetten bulunan bilgiler:\n{web_text}"
-            }
-        ]
-    )
-    return response.choices[0].message.content.strip()
+    try:
+        r = requests.get(url, timeout=6)
+        data = r.json()
+        items = data.get("items", [])
+        if not items:
+            return None
 
-# =========================
-# ROUTES
-# =========================
+        # En üst sonucu al
+        return items[0].get("snippet")
+    except:
+        return None
+
+# -----------------------------
+# Routes
+# -----------------------------
 @app.route("/", methods=["GET"])
 def health():
     return jsonify({"status": "ok"})
 
 @app.route("/ask", methods=["POST"])
 def ask():
-    q = (request.json or {}).get("text", "").strip()
-    if not q:
-        return jsonify({"answer": "Anlayamadım."})
+    data = request.json or {}
+    text = data.get("text", "").strip()
 
-    items = google_search(q)
+    if not text:
+        return jsonify({"answer": "Bir şey sorar mısın?"})
 
-    if not items:
-        return jsonify({"answer": "Bunu internette bulamadım."})
+    # 🔥 GÜNCEL SORU → WEB
+    if is_current_question(text):
+        snippet = google_search(text)
 
-    # Web içeriğini topla
-    web_text = " ".join(
-        f"{it.get('title','')} {it.get('snippet','')}"
-        for it in items
-    )
+        if snippet:
+            # çocuk dostu, kısa
+            return jsonify({
+                "answer": snippet.split(".")[0] + "."
+            })
+        else:
+            return jsonify({
+                "answer": "Bunu şu an net bulamadım."
+            })
 
-    answer = summarize_for_child(q, web_text)
-    return jsonify({"answer": answer})
+    # 🔹 NORMAL BİLGİ → GPT
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-5",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "7 yaşındaki bir çocuğa kısa ve net cevap ver."
+                },
+                {
+                    "role": "user",
+                    "content": text
+                }
+            ]
+        )
 
-# =========================
+        return jsonify({
+            "answer": resp.choices[0].message.content.strip()
+        })
+
+    except Exception:
+        return jsonify({
+            "answer": "Şu an cevap veremedim."
+        })
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
