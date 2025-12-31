@@ -5,13 +5,6 @@ from openai import OpenAI
 
 app = Flask(__name__)
 
-# ENV
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-GOOGLE_CSE_ID = os.getenv("GOOGLE_CSE_ID")
-
-client = OpenAI(api_key=OPENAI_API_KEY)
-
 
 @app.route("/", methods=["GET"])
 def health():
@@ -22,12 +15,18 @@ def health():
 # GOOGLE WEB SEARCH
 # ---------------------------
 def web_search(query: str) -> str:
+    google_key = os.getenv("GOOGLE_API_KEY")
+    cse_id = os.getenv("GOOGLE_CSE_ID")
+
+    if not google_key or not cse_id:
+        return "Web araması yapılamıyor (Google API ayarlı değil)."
+
     try:
         r = requests.get(
             "https://www.googleapis.com/customsearch/v1",
             params={
-                "key": GOOGLE_API_KEY,
-                "cx": GOOGLE_CSE_ID,
+                "key": google_key,
+                "cx": cse_id,
                 "q": query,
                 "hl": "tr",
                 "num": 5
@@ -39,31 +38,33 @@ def web_search(query: str) -> str:
 
         results = []
         for item in data.get("items", []):
-            results.append(
-                f"{item.get('title')}: {item.get('snippet')}"
-            )
+            results.append(f"{item.get('title')}: {item.get('snippet')}")
 
         return "\n".join(results) if results else "Web sonucu bulunamadı."
 
     except Exception as e:
-        return f"Web araması yapılamadı: {str(e)}"
+        return f"Web araması hatası: {str(e)}"
 
 
 # ---------------------------
-# AKIL: WEB GEREKİYOR MU?
+# WEB GEREKİR Mİ?
 # ---------------------------
 def needs_web(text: str) -> bool:
-    # Güvenlik kilidi: zamansal belirsizlik varsa WEB ZORUNLU
     time_words = [
-        "bugün", "şu an", "şimdi", "en son", "son", "sonuç",
-        "maç", "ne oldu", "kaç oldu", "güncel"
+        "bugün", "şu an", "şimdi", "en son", "son",
+        "sonuç", "maç", "ne oldu", "kaç oldu", "güncel"
     ]
 
     lower = text.lower()
     if any(w in lower for w in time_words):
         return True
 
-    # Modelden ikinci görüş
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return False
+
+    client = OpenAI(api_key=api_key)
+
     prompt = f"""
 Kullanıcı sorusu:
 {text}
@@ -71,15 +72,19 @@ Kullanıcı sorusu:
 Bu soru cevaplanırken güncel internet bilgisi gerekir mi?
 SADECE EVET veya HAYIR yaz.
 """
+
     r = client.chat.completions.create(
         model="gpt-5",
         messages=[{"role": "user", "content": prompt}],
         max_tokens=3
     )
+
     return "EVET" in r.choices[0].message.content.upper()
 
 
-
+# ---------------------------
+# ANA ENDPOINT
+# ---------------------------
 @app.route("/ask", methods=["POST"])
 def ask():
     try:
@@ -89,16 +94,16 @@ def ask():
         if not text:
             return jsonify({"answer": "Bir soru sorar mısın?"})
 
-        # 1️⃣ Web gerekir mi?
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            return jsonify({"answer": "AI servisi şu anda hazır değil."})
+
+        client = OpenAI(api_key=api_key)
+
         use_web = needs_web(text)
+        web_context = web_search(text) if use_web else ""
 
-        web_context = ""
-        if use_web:
-            web_context = web_search(text)
-
-        # 2️⃣ Ana cevap
         final_prompt = f"""
-Bir çocuğa veya sade bir kullanıcıya konuşuyorsun.
 Kısa, net ve anlaşılır cevap ver.
 
 Soru:
@@ -127,4 +132,3 @@ Soru:
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
-
