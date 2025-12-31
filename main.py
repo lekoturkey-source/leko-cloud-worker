@@ -36,28 +36,14 @@ def web_search(query: str) -> str:
         r.raise_for_status()
         data = r.json()
 
-        results = []
+        texts = []
         for item in data.get("items", []):
-            title = item.get("title", "")
-            snippet = item.get("snippet", "")
-            if title or snippet:
-                results.append(f"{title}: {snippet}")
+            texts.append(f"{item.get('title')}: {item.get('snippet')}")
 
-        return "\n".join(results)
+        return "\n".join(texts)
 
     except Exception:
         return ""
-
-
-# ---------------------------
-# WEB GEREKİR Mİ?
-# ---------------------------
-def needs_web(text: str) -> bool:
-    keywords = [
-        "bugün", "şu an", "şimdi", "en son",
-        "son", "sonuç", "maç", "kaç oldu", "güncel"
-    ]
-    return any(k in text.lower() for k in keywords)
 
 
 # ---------------------------
@@ -66,57 +52,51 @@ def needs_web(text: str) -> bool:
 @app.route("/ask", methods=["POST"])
 def ask():
     try:
-        payload = request.json or {}
-        text = payload.get("text", "").strip()
+        data = request.json or {}
+        text = data.get("text", "").strip()
 
         if not text:
-            return jsonify({"answer": "Bir soru sorar mısın?"})
+            return jsonify({"answer": "Bir soru sorar mısın?", "used_web": False})
 
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
-            return jsonify({"answer": "AI servisi hazır değil."})
+            return jsonify({"answer": "AI servisi şu anda hazır değil.", "used_web": False})
 
         client = OpenAI(api_key=api_key)
 
-        use_web = needs_web(text)
-        web_context = web_search(text) if use_web else ""
+        web_context = web_search(text)
 
         prompt = f"""
-Aşağıdaki soruya MUTLAKA cevap ver.
-Cevap boş OLAMAZ.
-Türkçe yaz.
-Kısa ve net ol.
+Sen Leko adında, kullanıcıya net cevap veren bir asistansın.
+
+KURALLAR:
+- ASLA boş cevap verme.
+- En az 1 cümle yazmak zorundasın.
+- Emin değilsen bunu açıkça söyle.
+- Uydurma bilgi verme.
 
 Soru:
 {text}
 
-Güncel bilgiler:
-{web_context if web_context else "Web bilgisi yok."}
+{"Güncel web bilgileri:" if web_context else ""}
+{web_context}
 """
 
-        response = client.chat.completions.create(
+        r = client.chat.completions.create(
             model="gpt-5-mini",
             messages=[{"role": "user", "content": prompt}],
-            max_completion_tokens=300
+            max_completion_tokens=200
         )
 
-        # 🔒 Güvenli cevap çıkarma
-        answer = ""
-        if response.choices:
-            msg = response.choices[0].message
-            if msg and msg.content:
-                answer = msg.content.strip()
+        answer = (r.choices[0].message.content or "").strip()
 
-        # 🔥 Son emniyet (ASLA boş dönmez)
+        # 🔒 MODEL GÜVENLİK KİLİDİ (heuristic değil)
         if not answer:
-            if web_context:
-                answer = "Güncel web kaynaklarında bu soruya dair net bir bilgi bulunamadı."
-            else:
-                answer = "Bu soruya şu anda güvenilir bir cevap veremiyorum."
+            answer = "Bu konuda net bir bilgi üretemedim ama istersen farklı şekilde sorabilirsin."
 
         return jsonify({
             "answer": answer,
-            "used_web": use_web
+            "used_web": bool(web_context)
         })
 
     except Exception as e:
