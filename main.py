@@ -7,7 +7,7 @@ app = Flask(__name__)
 @app.route("/", methods=["GET"])
 def health():
     return jsonify({"status": "ok"})
-
+print("MODEL:", "gpt-4o-mini")
 @app.route("/ask", methods=["POST"])
 def ask():
     data = request.json or {}
