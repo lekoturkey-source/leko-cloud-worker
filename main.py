@@ -2,8 +2,7 @@
 from flask import Flask, request, jsonify
 import os
 import re
-import requests
-from openai import OpenAI
+from openai import OpenAI, OpenAIError
 
 app = Flask(__name__)
 
@@ -11,12 +10,14 @@ app = Flask(__name__)
 # ENV
 # =========================
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
-GOOGLE_CSE_ID  = os.getenv("GOOGLE_CSE_ID", "")
-OPENAI_MODEL   = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
-HTTP_TIMEOUT = 8
+# Önce GPT-5 denenecek, olmazsa GPT-4
+PRIMARY_MODEL  = os.getenv("OPENAI_MODEL_PRIMARY", "gpt-5")
+FALLBACK_MODEL = os.getenv("OPENAI_MODEL_FALLBACK", "gpt-4o")
+
 MAX_SENTENCES = 2
+
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 # =========================
 # HEALTH
@@ -26,113 +27,53 @@ def health():
     return jsonify({"status": "ok"})
 
 # =========================
-# TOPIC DETECTION
+# OPENAI CALL (WITH FALLBACK)
 # =========================
-def detect_topic(q: str) -> str:
-    q = q.lower()
-
-    if any(k in q for k in ["dolar", "euro", "kur", "tl"]):
-        return "fx"
-
-    if any(k in q for k in ["hava", "yağmur", "kar", "sıcaklık"]):
-        return "weather"
-
-    if any(k in q for k in [
-        "maç", "skor", "gol",
-        "fener", "beşiktaş", "galatasaray"
-    ]):
-        return "sport"
-
-    if any(k in q for k in [
-        "kimdir", "bakan", "başkanı", "sahibi"
-    ]):
-        return "wiki"
-
-    return "general"
-
-# =========================
-# SITE RULES (KİLİTLİ)
-# =========================
-SITE_RULES = {
-    "fx": "site:tcmb.gov.tr",
-    "weather": "site:mgm.gov.tr",
-    "sport": "site:tff.org OR site:mackolik.com OR site:beinsports.com.tr",
-    "wiki": "site:tr.wikipedia.org",
-    "general": "site:aa.com.tr OR site:trthaber.com"
-}
-
-# =========================
-# GOOGLE SEARCH
-# =========================
-def google_search(query: str):
-    if not GOOGLE_API_KEY or not GOOGLE_CSE_ID:
-        return []
-
-    url = "https://www.googleapis.com/customsearch/v1"
-    params = {
-        "key": GOOGLE_API_KEY,
-        "cx": GOOGLE_CSE_ID,
-        "q": query,
-        "num": 5
-    }
-
-    try:
-        r = requests.get(url, params=params, timeout=HTTP_TIMEOUT)
-        r.raise_for_status()
-        return r.json().get("items", [])
-    except:
-        return []
-
-# =========================
-# BUILD CONTEXT
-# =========================
-def build_context(items):
-    blocks = []
-    for it in items[:5]:
-        title = it.get("title", "")
-        snippet = it.get("snippet", "")
-        blocks.append(f"{title}. {snippet}")
-    return "\n".join(blocks)
-
-# =========================
-# OPENAI ANSWER
-# =========================
-def openai_answer(question: str, context: str) -> str:
-    client = OpenAI(api_key=OPENAI_API_KEY)
-
+def ask_openai(question: str) -> str:
     system_prompt = (
         "Sen Leko adında bir çocuk robotsun.\n"
-        f"Cevapların en fazla {MAX_SENTENCES} kısa cümle olsun.\n"
-        "7 yaşındaki çocuk anlayacak şekilde konuş.\n"
-        "Kaynak, site adı, link, tarih, analiz anlatma.\n"
-        "‘Bulamadım’, ‘emin değilim’, ‘internet yok’ ASLA deme.\n"
-        "En olası doğru bilgiyi net söyle.\n"
+        "‘Bilmiyorum’, ‘emin değilim’ deme.\n"
+        "En olası doğru bilgiyi net ve sade anlat.\n"
     )
 
-    user_prompt = f"""
-Aşağıdaki bilgiler web sitelerinden alınmıştır.
-Bunları kullanarak soruya cevap ver.
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": question}
+    ]
 
-BİLGİLER:
-{context}
+    # 1️⃣ GPT-5 dene
+    try:
+        resp = client.chat.completions.create(
+            model=PRIMARY_MODEL,
+            messages=messages,
+            timeout=10
+        )
+        answer = resp.choices[0].message.content.strip()
+        return clean_answer(answer)
 
-SORU:
-{question}
-"""
+    except OpenAIError:
+        pass  # sessizce fallback'e geç
 
-    resp = client.chat.completions.create(
-        model=OPENAI_MODEL,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ],
-    )
+    # 2️⃣ GPT-4 fallback
+    try:
+        resp = client.chat.completions.create(
+            model=FALLBACK_MODEL,
+            messages=messages,
+            timeout=10
+        )
+        answer = resp.choices[0].message.content.strip()
+        return clean_answer(answer)
 
-    answer = resp.choices[0].message.content.strip()
-    answer = re.sub(r"https?://\S+", "", answer)
-    answer = re.sub(r"\s+", " ", answer)
+    except OpenAIError:
+        return "Bunu biraz daha basit sorar mısın?"
 
-    return answer
+# =========================
+# CLEAN OUTPUT
+# =========================
+def clean_answer(text: str) -> str:
+    text = re.sub(r"https?://\S+", "", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
 
 # =========================
 # MAIN ENDPOINT
@@ -140,19 +81,11 @@ SORU:
 @app.route("/ask", methods=["POST"])
 def ask():
     q = (request.json or {}).get("text", "").strip()
+
     if not q:
         return jsonify({"answer": "Tekrar sorar mısın?"})
 
-    topic = detect_topic(q)
-    site_filter = SITE_RULES[topic]
-
-    search_query = f"{site_filter} {q}"
-    items = google_search(search_query)
-
-    context = build_context(items)
-
-    answer = openai_answer(q, context)
-
+    answer = ask_openai(q)
     return jsonify({"answer": answer})
 
 # =========================
