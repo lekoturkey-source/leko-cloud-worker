@@ -20,18 +20,10 @@ def ask():
     client = OpenAI(api_key=api_key)
 
     try:
-        response = client.responses.create(
-            model="gpt-5",
-            input=text
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",  # hızlı ve yeterli
+            messages=[{"role": "user", "content": text}]
         )
-
-        answer = response.output_text
-        return jsonify({"answer": answer})
-
+        return jsonify({"answer": resp.choices[0].message.content})
     except Exception:
-        return jsonify({
-            "answer": "Şu anda buna cevap veremiyorum, biraz sonra tekrar deneyebiliriz."
-        })
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+        return jsonify({"answer": "Şu anda cevap veremiyorum."})
