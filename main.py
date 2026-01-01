@@ -10,46 +10,37 @@ def health():
 
 @app.route("/ask", methods=["POST"])
 def ask():
+    data = request.json or {}
+    text = (data.get("text") or "").strip()
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return jsonify({"error": "OPENAI_API_KEY_NOT_FOUND"}), 500
+
+    if not text:
+        return jsonify({"answer": ""})
+
+    client = OpenAI(api_key=api_key)
+
     try:
-        data = request.json or {}
-        text = data.get("text", "").strip()
+        # ✅ GPT-5 DOĞRU ÇAĞRI
+        response = client.responses.create(
+            model="gpt-5",
+            input=text
+        )
 
-        # 1️⃣ API KEY KONTROLÜ
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            return jsonify({
-                "error": "OPENAI_API_KEY_NOT_FOUND"
-            }), 500
+        # GPT-5 output alma (en güvenli yol)
+        answer = response.output_text
 
-        client = OpenAI(api_key=api_key)
+        if not answer:
+            answer = "Tamam, anladım."
 
-        # 2️⃣ ÖNCE GPT-5 DENEME
-        try:
-            response = client.chat.completions.create(
-                model="gpt-5",
-                messages=[
-                    {"role": "user", "content": text}
-                ]
-            )
-            answer = response.choices[0].message.content
-
-        # 3️⃣ GPT-5 OLMAZSA GPT-4o-mini FALLBACK
-        except Exception:
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "user", "content": text}
-                ]
-            )
-            answer = response.choices[0].message.content
-
-        return jsonify({
-            "answer": answer
-        })
+        return jsonify({"answer": answer})
 
     except Exception as e:
+        # ❗ Bu mesaj LEKO'YA GİTMEZ, sadece HTTP
         return jsonify({
-            "error": "INTERNAL_ERROR",
+            "error": "OPENAI_ERROR",
             "detail": str(e)
         }), 500
 
